@@ -1,326 +1,377 @@
-/**
- * App — Helix-Force Buoy, Marlow's local implementation from Gemini's design.
- *
- * Follows the structure Gemini listed for the Buoy 3D Core app's App.tsx
- * [G22 §5]: global state variables (plungerSetting, overEnergize,
- * modeABoost, telemetry state handlers).
- *
- * STATE RULES:
- *  - Envelope: NO default winner. The app opens in comparison mode and
- *    the simulator refuses to run until Ray (or the viewer) picks an
- *    envelope explicitly. Both envelopes are shown side by side.
- *  - plungerSetting 0.50×–1.50×, overEnergize toggle, Mode A Harvest /
- *    Mode B Boost, tide presets (fill-rate only, never hull motion).
- *  - Logs ship empty; true numbers only. No prices anywhere.
- *
- * This file is a local implementation for Ray's review. It does NOT edit
- * the Buoy 3D Core app in AI Studio or any Base44 app, and it publishes
- * nothing.
- */
-
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from 'react';
+import { Zap } from 'lucide-react';
+import { BuoyCore3D } from './components/BuoyCore3D';
+import { DisplayForms } from './components/DisplayForms';
+import { OperatingPrincipleAndSizing } from './components/OperatingPrincipleAndSizing';
+import { PartDetailModal } from './components/PartDetailModal';
+import { Schematics } from './components/Schematics';
+import { TechnicalDrawings } from './components/TechnicalDrawings';
 import {
+  APP_FOOTER,
+  APP_SUBTITLE,
+  APP_TITLE,
+  BOOST_EMPTY_MESSAGE,
+  EnvelopeId,
   ENVELOPES,
-  STAGES,
-  PARTS,
-  TIDE_PRESETS,
-  SIMULATION_LABEL,
-  TARGET_OUTPUT_LABEL,
-  defaultControls,
-  initialState,
+  ENVELOPE_SELECTOR_PAUSED_MESSAGE,
+  PartSelection,
+  SimTelemetry,
   stepSimulation,
-  evaluateEmGuards,
-  type EnvelopeId,
-  type SimControls,
-  type SimState,
-} from "./data/rayDesignData";
-import { BuoyCore3D } from "./components/BuoyCore3D";
-import { OperatingPrincipleAndSizing } from "./components/OperatingPrincipleAndSizing";
-import { PartDetailModal, type PartSelection } from "./components/PartDetailModal";
-import { Schematics } from "./components/Schematics";
+  TARGET_OUTPUT_LABEL,
+  TideLevel,
+} from './data/rayDesignData';
 
-export function App() {
-  const [controls, setControls] = useState<SimControls>(defaultControls());
-  const [sim, setSim] = useState<SimState>(() => initialState(defaultControls()));
-  const [detailPart, setDetailPart] = useState<PartSelection>(null);
-  const [running, setRunning] = useState(false);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+type ActiveSection = 'core3d' | 'drawings' | 'schematics' | 'forms';
 
-  const envelope =
-    controls.envelope === "unresolved" ? null : ENVELOPES[controls.envelope];
+export default function App() {
+  const [section, setSection] = useState<ActiveSection>('core3d');
+  const [tide, setTide] = useState<TideLevel>('Moderate');
+  const [paused, setPaused] = useState(false);
+  const [plungerSetting, setPlungerSetting] = useState(1.0);
+  const [overEnergize, setOverEnergize] = useState(false);
+  const [selectedStageId, setSelectedStageId] = useState<string | null>(null);
+  const [detailPartNumber, setDetailPartNumber] = useState<PartSelection | null>(null);
+  // Gemini spec File 7 — dual-envelope selector. Default "unresolved":
+  // the simulator refuses to run until Ray picks a baseline bore.
+  const [envelope, setEnvelope] = useState<EnvelopeId | 'unresolved'>('unresolved');
+  const envelopeResolved = envelope !== 'unresolved';
+  const selectedEnv = envelopeResolved ? ENVELOPES[envelope] : null;
 
-  // Simulator loop: 10 steps per second while running.
+  const [telemetry, setTelemetry] = useState<SimTelemetry>({
+    deltaP: 840,
+    displacementBar: 0.35,
+    plungerAirBar: 1.45,
+    turbineRpm: 118,
+    strokeDepth: 0.22,
+    coilVolts: 6.4,
+    simPowerWatts: 180,
+    charge: 42,
+    mode: 'Harvest',
+    boostProgress: 0,
+    boostMessage: null,
+    phase: 0,
+    waveElevation: 0,
+    waterLevel: 0.28,
+    triggerThreshold: 0.69,
+    triggerPhase: 'FILLING',
+    triggerFired: false,
+    camAngle: 0.14,
+    dischargePulse: 0.1,
+    pistonPosition: 0,
+    pistonVelocity: 0,
+    flowRateNorm: 0.35,
+    solarTrickleActive: true,
+    simTimeS: 0,
+    cycleCount: 0,
+    cycleStartTimeS: 0,
+    emergentCycleHz: null,
+    plenumBarGauge: null,
+    plenumOverPressure: null,
+    sizingParadox: false,
+    flapperOpen: true,
+    footValveOpen: false,
+    needleValve: 'SEATED',
+    accumulatorBar: 1.45,
+    warnings: [],
+  });
+
+  // Shared live simulation loop so 3D Core, Technical Drawings, Schematics, and Display Forms stay synchronized.
+  // Refusal guard (Gemini spec File 7): while the envelope is unresolved the
+  // loop does not advance — the sim is paused until Ray picks a baseline bore.
   useEffect(() => {
-    if (timer.current) clearInterval(timer.current);
-    if (!running || !envelope) return;
-    timer.current = setInterval(() => {
-      setSim((prev) => stepSimulation(prev, controls, 0.1));
-    }, 100);
-    return () => {
-      if (timer.current) clearInterval(timer.current);
+    if (paused || !envelopeResolved) return;
+    let rafId = 0;
+    let last = performance.now();
+    let uiAccum = 0;
+
+    const loop = (now: number) => {
+      const dt = Math.min((now - last) / 1000, 0.08);
+      last = now;
+      uiAccum += dt;
+
+      if (uiAccum >= 0.05) {
+        const stepDt = uiAccum;
+        uiAccum = 0;
+        setTelemetry((prev) =>
+          stepSimulation(prev, tide, stepDt, false, {
+            plungerSetting,
+            overEnergize,
+            envelope,
+          })
+        );
+      }
+      rafId = requestAnimationFrame(loop);
     };
-  }, [running, envelope, controls]);
 
-  const pickEnvelope = (id: EnvelopeId) => {
-    const next = { ...controls, envelope: id };
-    setControls(next);
-    setSim(initialState(next));
-  };
+    rafId = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafId);
+  }, [tide, paused, plungerSetting, overEnergize, envelope, envelopeResolved]);
 
-  const setPlungerSetting = (v: number) =>
-    setControls((c) => ({ ...c, plungerSetting: v }));
-  const setOverEnergize = (v: boolean) =>
-    setControls((c) => ({ ...c, overEnergize: v }));
-  const setMode = (mode: "Harvest" | "Boost") =>
-    setControls((c) => ({ ...c, mode }));
-  const setTide = (tide: SimControls["tide"]) =>
-    setControls((c) => ({ ...c, tide }));
-  const setEmPulse = (v: boolean) =>
-    setControls((c) => ({ ...c, emPulseEnabled: v }));
+  const handleTriggerBoost = useCallback(() => {
+    setTelemetry((prev) => {
+      if (prev.mode === 'Boost') return prev;
+      if (prev.charge < 12) {
+        return {
+          ...prev,
+          boostMessage: BOOST_EMPTY_MESSAGE,
+        };
+      }
+      return {
+        ...prev,
+        mode: 'Boost',
+        boostProgress: 0,
+        boostMessage: null,
+      };
+    });
+  }, []);
 
-  const emGuards = envelope ? evaluateEmGuards(envelope) : [];
+  const handleSetHarvest = useCallback(() => {
+    setTelemetry((prev) => ({
+      ...prev,
+      mode: 'Harvest',
+      boostProgress: 0,
+      boostMessage: null,
+    }));
+  }, []);
+
+  const handleOpenCenterNeedle = useCallback(() => {
+    setDetailPartNumber('center-needle');
+  }, []);
+
+  const navItems: { id: ActiveSection; label: string }[] = [
+    { id: 'core3d', label: '3D Core' },
+    { id: 'drawings', label: 'Technical Drawings' },
+    { id: 'schematics', label: 'Schematics' },
+    { id: 'forms', label: 'Display Forms' },
+  ];
 
   return (
-    <div>
-      <header>
-        <p>HELIX-FORCE</p>
-        <h1>Smart-Hybrid Buoy — Marlow&rsquo;s build from Gemini&rsquo;s design</h1>
-        <p>
-          Ray&rsquo;s wave-energy buoy: a weighted plunger and a spiral of
-          water, a Halbach heart and a bank of supercapacitors — built to
-          harvest the sea&rsquo;s motion and scrub the water that passes
-          through her.
-        </p>
-        <p>{TARGET_OUTPUT_LABEL}</p>
-        <p>{SIMULATION_LABEL}</p>
+    <div className="min-h-screen flex flex-col bg-[#050b16] text-slate-100">
+      {/* Top Bar Contract: 3 clean zones separated by gap-8 */}
+      <header className="flex items-center justify-between gap-8 px-6 py-3.5 bg-[#060e1d] border-b border-cyan-500/20">
+        {/* Zone 1: Single-line Brand Wordmark */}
+        <button
+          type="button"
+          onClick={() => setSection('core3d')}
+          className="font-display text-base sm:text-lg font-bold tracking-tight text-slate-100 hover:text-cyan-200 transition-colors whitespace-nowrap shrink-0 text-left"
+        >
+          Helix-Force Buoy 3D Core
+        </button>
+
+        {/* Zone 2: 4 single-line text navigation links */}
+        <nav
+          aria-label="Primary sections"
+          className="flex items-center gap-6 overflow-x-auto"
+        >
+          {navItems.map((item) => {
+            const active = section === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setSection(item.id)}
+                className={`text-sm font-medium pb-1 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+                  active
+                    ? 'text-cyan-200 border-cyan-400'
+                    : 'text-slate-400 border-transparent hover:text-slate-100'
+                }`}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Zone 3: permanent TARGET banner (cannot be toggled off) + 1 primary action */}
+        <div className="shrink-0 flex items-center gap-3">
+          <span className="hidden lg:inline font-mono text-[11px] text-amber-300 whitespace-nowrap">
+            {TARGET_OUTPUT_LABEL} · SIMULATION READOUTS ONLY
+          </span>
+          <button
+            type="button"
+            onClick={handleTriggerBoost}
+            disabled={!envelopeResolved}
+            title={!envelopeResolved ? ENVELOPE_SELECTOR_PAUSED_MESSAGE : undefined}
+            className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 border ${
+              !envelopeResolved
+                ? 'bg-[#0b1b33] text-slate-500 border-slate-600/40 cursor-not-allowed'
+                : telemetry.mode === 'Boost'
+                  ? 'bg-amber-400 text-slate-950 border-amber-300'
+                  : 'bg-[#0b1b33] text-amber-300 border-amber-400/45 hover:bg-amber-400/15'
+            }`}
+          >
+            <Zap className="w-3.5 h-3.5" />
+            <span>{telemetry.mode === 'Boost' ? 'Boosting Pulse' : 'Boost Pulse'}</span>
+          </button>
+        </div>
       </header>
 
-      {/* Envelope choice — no default winner. */}
-      <section aria-label="Sizing envelope">
-        <h2>1 · Choose a sizing envelope</h2>
-        <p>
-          The two envelopes disagree (bore 180 vs 450 mm, tank 50 L vs
-          250 L). Both are kept. The simulator will not run until one is
-          picked — this build picks no winner.
-        </p>
-        <div role="group" aria-label="Sizing envelope">
-          {(Object.keys(ENVELOPES) as EnvelopeId[]).map((id) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => pickEnvelope(id)}
-              aria-pressed={controls.envelope === id}
-            >
-              {ENVELOPES[id].name}
-            </button>
-          ))}
+      {/* Sub-header strip with exact App Title, Subtitle, Target Output & Draft Notice */}
+      <div className="px-6 py-2 bg-[#040914] border-b border-cyan-500/12 flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div className="flex flex-wrap items-center gap-2 text-slate-300">
+          <span className="font-display font-medium text-cyan-200">{APP_TITLE}</span>
+          <span aria-hidden="true" className="text-slate-600">·</span>
+          <span className="text-slate-300">{APP_SUBTITLE}</span>
         </div>
-        {envelope ? (
-          <p>
-            Active: {envelope.name} — {envelope.sourceDoc}. Bore{" "}
-            {envelope.boreM * 1000} mm × {envelope.strokeM.toFixed(2)} m
-            stroke, tank {Math.round(envelope.tankVolumeM3 * 1000)} L @{" "}
-            {(envelope.tankNominalPa / 100000).toFixed(2)} bar nominal.
-          </p>
-        ) : (
-          <p>No envelope chosen — the simulator is waiting.</p>
-        )}
-      </section>
-
-      {envelope ? (
-        <>
-          {/* Controls */}
-          <section aria-label="Controls">
-            <h2>2 · Controls</h2>
-            <div>
-              <label htmlFor="plunger-setting">
-                Air Tank Plunger — Adjustable ({controls.plungerSetting.toFixed(2)}
-                ×)
-              </label>
-              <input
-                id="plunger-setting"
-                type="range"
-                min={0.5}
-                max={1.5}
-                step={0.05}
-                value={controls.plungerSetting}
-                onChange={(e) => setPlungerSetting(Number(e.target.value))}
-              />
-              <span>0.50×–1.50×</span>
-            </div>
-            <div>
-              <label htmlFor="over-energize">
-                <input
-                  id="over-energize"
-                  type="checkbox"
-                  checked={controls.overEnergize}
-                  onChange={(e) => setOverEnergize(e.target.checked)}
-                />{" "}
-                Over-Energize (tank to its ceiling:{" "}
-                {(envelope.overEnergizedPa / 100000).toFixed(1)} bar)
-              </label>
-            </div>
-            <div role="group" aria-label="Router mode">
-              <button
-                type="button"
-                onClick={() => setMode("Harvest")}
-                aria-pressed={controls.mode === "Harvest"}
-              >
-                A · Harvest
-              </button>
-              <button
-                type="button"
-                onClick={() => setMode("Boost")}
-                aria-pressed={controls.mode === "Boost"}
-              >
-                B · Boost
-              </button>
-            </div>
-            <div>
-              <label htmlFor="tide">Tide (fill-rate only)</label>
-              <select
-                id="tide"
-                value={controls.tide}
-                onChange={(e) => setTide(e.target.value as SimControls["tide"])}
-              >
-                {TIDE_PRESETS.map((t) => (
-                  <option key={t.key} value={t.key}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label htmlFor="em-pulse">
-                <input
-                  id="em-pulse"
-                  type="checkbox"
-                  checked={controls.emPulseEnabled}
-                  onChange={(e) => setEmPulse(e.target.checked)}
-                />{" "}
-                EM repulsion pulse (Ray&rsquo;s concept — net energy deficit
-                applies; see guards)
-              </label>
-            </div>
-            <div>
-              <button
-                type="button"
-                onClick={() => setRunning((r) => !r)}
-                disabled={!envelope}
-              >
-                {running ? "Pause the sea" : "Run the cycle"}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setRunning(false);
-                  setSim(initialState(controls));
-                }}
-              >
-                Reset
-              </button>
-            </div>
-          </section>
-
-          {/* 3D core */}
-          <section aria-label="3D core">
-            <h2>3 · 3D Core</h2>
-            <BuoyCore3D envelope={envelope} telemetry={sim.telemetry} />
-            <p>
-              Phase: {sim.telemetry.phase} · Piston{" "}
-              {sim.telemetry.pistonY.toFixed(2)} m of{" "}
-              {envelope.strokeM.toFixed(2)} m · Pan fill{" "}
-              {(sim.telemetry.waterLevel * 100).toFixed(0)}% · Turbine{" "}
-              {Math.round(sim.telemetry.turbineRPM)} RPM ·{" "}
-              {sim.telemetry.electricalW.toFixed(0)} W (simulation) · Cycles:{" "}
-              {sim.cycles}
-              {sim.emergentCycleHz !== null
-                ? ` · Emergent cycle rate: ${sim.emergentCycleHz.toFixed(2)} Hz (stated: ${envelope.cycleHz.toFixed(2)} Hz)`
-                : ""}
-            </p>
-            {sim.telemetry.warnings.length > 0 ? (
-              <div role="alert">
-                <h3>Warnings</h3>
-                <ul>
-                  {sim.telemetry.warnings.map((w) => (
-                    <li key={w}>{w}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-          </section>
-
-          {/* Schematics */}
-          <Schematics
-            envelope={envelope}
-            telemetry={sim.telemetry}
-            onOpenPart={(key) => setDetailPart(key as PartSelection)}
-          />
-
-          {/* EM guards */}
-          <section aria-label="EM coil guards">
-            <h2>EM repulsion coil guards</h2>
-            <ul>
-              {emGuards.map((g) => (
-                <li key={g.check}>
-                  <strong>
-                    {g.check} — {g.result}
-                  </strong>
-                  : {g.detail}
-                </li>
-              ))}
-            </ul>
-          </section>
-
-          {/* Parts */}
-          <section aria-label="Parts">
-            <h2>15-part gather list</h2>
-            <ul>
-              {PARTS.map((p) => (
-                <li key={p.key}>
-                  <button type="button" onClick={() => setDetailPart(p.key)}>
-                    {p.num}. {p.name}
-                  </button>{" "}
-                  — {p.detail}
-                </li>
-              ))}
-            </ul>
-            <button type="button" onClick={() => setDetailPart("center-needle")}>
-              Featured: Air Plunger — Center Needle
+        <div className="flex flex-wrap items-center gap-3 font-mono text-[11px]">
+          <span className="text-amber-300">{TARGET_OUTPUT_LABEL}</span>
+          <span aria-hidden="true" className="text-slate-600">·</span>
+          <span className="text-slate-400">
+            Ray Mroczkowski (Ray&apos;s Ironworks) · Unpublished Draft Only
+          </span>
+          <span aria-hidden="true" className="text-slate-600">·</span>
+          {/* Gemini spec File 7 — envelope selector */}
+          <div className="flex items-center gap-2" role="group" aria-label="Sizing envelope">
+            <button
+              type="button"
+              onClick={() => setEnvelope('A-marlow')}
+              className={`px-2.5 py-1 rounded border text-[11px] transition-colors whitespace-nowrap ${
+                envelope === 'A-marlow'
+                  ? 'bg-cyan-500/25 text-cyan-200 border-cyan-400/50 font-semibold'
+                  : 'bg-[#0b182e] text-slate-300 border-cyan-500/25 hover:text-white'
+              }`}
+            >
+              Envelope A (180 mm)
             </button>
-          </section>
+            <button
+              type="button"
+              onClick={() => setEnvelope('B-gemini')}
+              className={`px-2.5 py-1 rounded border text-[11px] transition-colors whitespace-nowrap ${
+                envelope === 'B-gemini'
+                  ? 'bg-cyan-500/25 text-cyan-200 border-cyan-400/50 font-semibold'
+                  : 'bg-[#0b182e] text-slate-300 border-cyan-500/25 hover:text-white'
+              }`}
+            >
+              Envelope B (450 mm)
+            </button>
+            <button
+              type="button"
+              onClick={() => setEnvelope('unresolved')}
+              className={`px-2.5 py-1 rounded border text-[11px] transition-colors whitespace-nowrap ${
+                envelope === 'unresolved'
+                  ? 'bg-amber-400/20 text-amber-200 border-amber-400/50 font-semibold'
+                  : 'bg-[#0b182e] text-slate-300 border-cyan-500/25 hover:text-white'
+              }`}
+            >
+              Compare / Unresolved
+            </button>
+            {selectedEnv && (
+              <span className="text-slate-400 whitespace-nowrap">
+                Stroke {selectedEnv.strokeM.toFixed(2)} m · Air{' '}
+                {Math.round(selectedEnv.tankVolumeM3 * 1000)} L @{' '}
+                {(selectedEnv.tankNominalPa / 100000).toFixed(2)} bar
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
 
-          {/* Stages */}
-          <section aria-label="Stages">
-            <h2>12-stage stack</h2>
-            <ol>
-              {STAGES.map((s) => (
-                <li key={s.key}>
-                  {s.num} · {s.name} — {s.note}
-                </li>
-              ))}
-            </ol>
-          </section>
-        </>
-      ) : null}
+      {/* Refusal guard (Gemini spec File 7): unresolved envelope pauses the simulator */}
+      {!envelopeResolved && (
+        <div className="px-6 py-2 bg-amber-400/10 border-b border-amber-400/40 text-center">
+          <span className="font-mono text-xs text-amber-200">
+            {ENVELOPE_SELECTOR_PAUSED_MESSAGE}
+          </span>
+        </div>
+      )}
 
-      {/* Operating principle + sizing — always visible. */}
-      <OperatingPrincipleAndSizing />
+      {/* Active Workspace Section */}
+      <main className="flex-1 flex flex-col">
+        {section === 'core3d' && (
+          <BuoyCore3D
+            telemetry={telemetry}
+            tide={tide}
+            paused={paused}
+            plungerSetting={plungerSetting}
+            overEnergize={overEnergize}
+            selectedStageId={selectedStageId}
+            onSelectStage={setSelectedStageId}
+            onChangeTide={setTide}
+            onChangePlungerSetting={setPlungerSetting}
+            onToggleOverEnergize={() => setOverEnergize((prev) => !prev)}
+            onTogglePause={() => setPaused((p) => !p)}
+            onTriggerBoost={handleTriggerBoost}
+            onSetHarvest={handleSetHarvest}
+            onOpenPartDetail={(partNum) => setDetailPartNumber(partNum)}
+            onOpenCenterNeedle={handleOpenCenterNeedle}
+          />
+        )}
 
-      <PartDetailModal
-        selection={detailPart}
-        onClose={() => setDetailPart(null)}
-      />
+        {section === 'drawings' && (
+          <TechnicalDrawings
+            telemetry={telemetry}
+            tide={tide}
+            selectedStageId={selectedStageId}
+            onSelectStage={setSelectedStageId}
+            onOpenPartDetail={(partNum) => setDetailPartNumber(partNum)}
+            onOpenCenterNeedle={handleOpenCenterNeedle}
+          />
+        )}
 
-      <footer>
-        <p>
-          Water enters, turns in a spiral, meets a magnetic heart, leaves
-          cleaner than it came — and the turning pays for the cleaning.
-        </p>
-        <p>
-          His design. Her memory. One change at a time. Slow and smooth,
-          smooth is fast.
-        </p>
+        {section === 'schematics' && (
+          <Schematics
+            telemetry={telemetry}
+            tide={tide}
+            paused={paused}
+            plungerSetting={plungerSetting}
+            overEnergize={overEnergize}
+            selectedStageId={selectedStageId}
+            onSelectStage={setSelectedStageId}
+            onTogglePause={() => setPaused((p) => !p)}
+            onTriggerBoost={handleTriggerBoost}
+            onSetHarvest={handleSetHarvest}
+            onOpenPartDetail={(partNum) => setDetailPartNumber(partNum)}
+            onOpenCenterNeedle={handleOpenCenterNeedle}
+          />
+        )}
+
+        {section === 'forms' && (
+          <DisplayForms
+            telemetry={telemetry}
+            tide={tide}
+            paused={paused}
+            plungerSetting={plungerSetting}
+            overEnergize={overEnergize}
+            selectedStageId={selectedStageId}
+            onSelectStage={setSelectedStageId}
+            onChangeTide={setTide}
+            onChangePlungerSetting={setPlungerSetting}
+            onToggleOverEnergize={() => setOverEnergize((prev) => !prev)}
+            onTogglePause={() => setPaused((p) => !p)}
+            onTriggerBoost={handleTriggerBoost}
+            onSetHarvest={handleSetHarvest}
+            onOpenPartDetail={(partNum) => setDetailPartNumber(partNum)}
+            onOpenCenterNeedle={handleOpenCenterNeedle}
+          />
+        )}
+
+        {/* Operating Principle & 2,000 W Sizing Reference Band */}
+        <div className="px-6 py-6 bg-[#040914] border-t border-cyan-500/20">
+          <div className="max-w-[1360px] mx-auto">
+            <OperatingPrincipleAndSizing
+              onOpenCenterNeedle={handleOpenCenterNeedle}
+              showPrinciple
+              showSizing={section !== 'drawings'}
+              selectedEnvelope={envelope}
+            />
+          </div>
+        </div>
+      </main>
+
+      {detailPartNumber !== null && (
+        <PartDetailModal
+          partNumber={detailPartNumber}
+          onClose={() => setDetailPartNumber(null)}
+          onSelectPart={setDetailPartNumber}
+        />
+      )}
+
+      {/* Ray's Verbatim Footer */}
+      <footer className="px-6 py-3 bg-[#040914] border-t border-cyan-500/15 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400">
+        <span>{APP_FOOTER}</span>
+        <span className="font-mono text-[11px] text-slate-500">
+          Unpublished Draft · Ray&apos;s Design Only
+        </span>
       </footer>
     </div>
   );

@@ -1,0 +1,6 @@
+{
+  "name": "Helix-Force Buoy 3D Core — Electric Field Generator System",
+  "description": "Ray's design, visualized under his direction. Unpublished draft.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

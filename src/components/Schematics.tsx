@@ -217,6 +217,21 @@ export const Schematics: React.FC<SchematicsProps> = ({
               <span className="px-2 py-1 rounded border border-cyan-500/30 bg-[#071225] text-cyan-200">
                 Needle Valve: {valves.needleValve}
               </span>
+              <span className="px-2 py-1 rounded border border-cyan-500/30 bg-[#071225] text-cyan-200">
+                Intake Levers: {telemetry.flapperOpen ? 'OPEN −35°' : 'SHUT 0°'}
+              </span>
+              <span className="px-2 py-1 rounded border border-cyan-500/30 bg-[#071225] text-cyan-200">
+                Exhaust Levers: {telemetry.footValveOpen ? 'OPEN +45°' : 'SHUT 0°'}
+              </span>
+              <span className="px-2 py-1 rounded border border-cyan-500/30 bg-[#071225] text-cyan-200">
+                Turbine Pitch: {telemetry.turbinePitchDeg}° · torque ×
+                {(Math.sin((telemetry.turbinePitchDeg * Math.PI) / 180) / Math.sin((35 * Math.PI) / 180)).toFixed(2)}{' '}
+                (sin-model estimate — for Ray to true)
+              </span>
+              <span className="px-2 py-1 rounded border border-cyan-500/30 bg-[#071225] text-cyan-200">
+                Perimeter Ports: 12 × 60 mm — water cascades through the ring into the Quad-Venturi
+                bells (count/diameter for Ray to true)
+              </span>
               <span className={`px-2 py-1 rounded border bg-[#071225] ${telemetry.plenumOverPressure ? 'border-red-400/60 text-red-300' : 'border-amber-400/40 text-amber-200'}`}>
                 Plenum Pressure: {plenumTag}
               </span>

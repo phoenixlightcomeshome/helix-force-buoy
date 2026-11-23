@@ -19,6 +19,7 @@ import {
 import {
   BuoyStage,
   DIAGRAM_IMAGE_SRC,
+  EnvelopeId,
   PART_DETAILS,
   SimTelemetry,
   STAGES,
@@ -33,6 +34,11 @@ interface BuoyCore3DProps {
   paused: boolean;
   plungerSetting: number;
   overEnergize: boolean;
+  // Gemini fix spec (Nov 22, 9:10 PM): sizing envelope (for the carriage
+  // stroke scale) + effective turbine pitch + pitch slider callback.
+  envelope: EnvelopeId | 'unresolved';
+  turbinePitchDeg: number;
+  onChangeTurbinePitchDeg: (value: number) => void;
   selectedStageId: string | null;
   onSelectStage: (stageId: string | null) => void;
   onChangeTide: (tide: TideLevel) => void;
@@ -71,6 +77,8 @@ const _scaleVec = new THREE.Vector3();
 const _upVec = new THREE.Vector3(0, 1, 0);
 const _dirVec = new THREE.Vector3();
 const _color = new THREE.Color();
+// Scratch axis for the hinged water in/out levers (Fix 3) — set per flap.
+const _flapAxis = new THREE.Vector3();
 const _cyanColor = new THREE.Color(0x00e5ff);
 const _goldColor = new THREE.Color(0xe5b842);
 const _whiteCyan = new THREE.Color(0xb8f6ff);
@@ -185,6 +193,9 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
   paused,
   plungerSetting,
   overEnergize,
+  envelope,
+  turbinePitchDeg,
+  onChangeTurbinePitchDeg,
   selectedStageId,
   onSelectStage,
   onChangeTide,
@@ -218,6 +229,11 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
 
   const overEnergizeRef = useRef(overEnergize);
   overEnergizeRef.current = overEnergize;
+
+  // Gemini fix spec File 2: envelope drives the carriage stroke scale in
+  // the tick (1.65 units for A, 1.07 for B).
+  const envelopeRef = useRef(envelope);
+  envelopeRef.current = envelope;
 
   const explodedRef = useRef(exploded);
   explodedRef.current = exploded;
@@ -665,28 +681,31 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
         emissiveIntensity: 0.35,
       })
     );
-    const underTankVesselGeo = trackGeo(new THREE.CapsuleGeometry(0.42, 0.82, 12, 24));
-    underTankVesselGeo.rotateZ(Math.PI / 2);
+    // STAND TANK VERTICAL (Gemini fix spec File 2, Fix 1 — Do NOT
+    // rotateZ(Math.PI / 2)): capsule aligned vertically along the Y-axis
+    // directly beneath the center needle, on the buoy's vertical centerline.
+    const underTankVesselGeo = trackGeo(new THREE.CapsuleGeometry(0.38, 1.25, 16, 24));
     const underTankVessel = new THREE.Mesh(underTankVesselGeo, underTankMat);
-    underTankVessel.position.set(0, -3.58, 0.14);
+    underTankVessel.position.set(0, -3.85, 0);
     underTankVessel.userData.isCenterNeedle = true;
     underTankGroup.add(underTankVessel);
     pickableMeshes.push(underTankVessel);
 
-    // Twin cradle strap bands & mounting struts up to the lower base
-    const tankBandGeo = trackGeo(new THREE.TorusGeometry(0.44, 0.032, 10, 28));
-    tankBandGeo.rotateY(Math.PI / 2);
-    [-0.32, 0.32].forEach((bx) => {
+    // Twin cradle strap bands (horizontal rings around the vertical tank)
+    // & mounting struts up to the lower base
+    const tankBandGeo = trackGeo(new THREE.TorusGeometry(0.4, 0.032, 10, 28));
+    tankBandGeo.rotateX(Math.PI / 2);
+    [-0.32, 0.32].forEach((by) => {
       const band = new THREE.Mesh(tankBandGeo, goldMat);
-      band.position.set(bx, -3.58, 0.14);
+      band.position.set(0, -3.85 + by, 0);
       band.userData.isCenterNeedle = true;
       underTankGroup.add(band);
 
       const strut = new THREE.Mesh(
-        trackGeo(new THREE.CylinderGeometry(0.032, 0.032, 1.15, 10)),
+        trackGeo(new THREE.CylinderGeometry(0.032, 0.032, 0.55, 10)),
         brushedSteelMat
       );
-      strut.position.set(bx, -2.98, 0.14);
+      strut.position.set(by > 0 ? 0.38 : -0.38, -2.6, 0);
       underTankGroup.add(strut);
     });
 
@@ -739,7 +758,7 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
       })
     );
     const underTankLabelSprite = new THREE.Sprite(underTankLabelMat);
-    underTankLabelSprite.position.set(2.2, -3.58, 0.72);
+    underTankLabelSprite.position.set(2.2, -3.85, 0.72);
     underTankLabelSprite.scale.set(2.9, 1.06, 1);
     underTankLabelSprite.renderOrder = 10;
     underTankLabelSprite.userData.isCenterNeedle = true;
@@ -747,8 +766,8 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
 
     const leaderLineGeo = trackGeo(
       new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(0.75, -3.58, 0.25),
-        new THREE.Vector3(1.15, -3.58, 0.52),
+        new THREE.Vector3(0.75, -3.85, 0.25),
+        new THREE.Vector3(1.15, -3.85, 0.52),
       ])
     );
     const leaderLineMat = trackMat(
@@ -824,6 +843,14 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
 
     const stageById = (id: string) => STAGES.find((s) => s.id === id)!;
 
+    // Gemini fix spec File 2 — hinged water in/out levers (Fix 3) and the
+    // variable-pitch turbine blades (Fix 6). Pivots are animated in the
+    // tick from the live telemetry angles; blades from turbinePitchDeg.
+    // Each pivot stores its chute angle in userData.angle.
+    const intakeFlapperPivots: THREE.Group[] = [];
+    const exhaustFlapperPivots: THREE.Group[] = [];
+    const turbineBlades: THREE.Mesh[] = [];
+
     // 01 — Central Air-Plunger — Top Scupper Intake
     {
       const g = new THREE.Group();
@@ -845,6 +872,25 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
         lip.position.set(Math.cos(angle) * 1.36, -0.1, Math.sin(angle) * 1.36);
         lip.rotation.y = -angle;
         g.add(lip);
+      }
+
+      // Fix 3 — Water IN: 4 hinged mechanical flapper levers at the crown
+      // intake chutes. Each flap is a lid hinged at its inner edge; the
+      // tick swings it down −35° (OPEN, FILLING) or shut to 0°
+      // (TRIGGERED / DISCHARGE). Pivot quaternion is set from the
+      // tangential hinge axis so the hinge is exact at every chute.
+      const flapGeo = trackGeo(new THREE.BoxGeometry(0.46, 0.04, 0.42));
+      for (let i = 0; i < 4; i++) {
+        const angle = (i * Math.PI) / 2 + Math.PI / 4;
+        const pivot = new THREE.Group();
+        pivot.position.set(Math.cos(angle) * 0.95, 0.14, Math.sin(angle) * 0.95);
+        pivot.userData.angle = angle;
+        const flap = new THREE.Mesh(flapGeo, goldMat);
+        flap.position.set(Math.cos(angle) * 0.23, 0, Math.sin(angle) * 0.23);
+        flap.rotation.y = -angle;
+        pivot.add(flap);
+        g.add(pivot);
+        intakeFlapperPivots.push(pivot);
       }
 
       const throatGuideGeo = trackGeo(new THREE.TorusGeometry(0.95, 0.045, 10, 36));
@@ -871,6 +917,9 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
       const shellGeo = trackGeo(
         new THREE.CylinderGeometry(0.88, 0.88, 0.24, 32, 1, true, Math.PI * 0.25, Math.PI * 1.5)
       );
+      // Fix 1 — face the 90° section cutaway toward the default camera
+      // (azimuth ≈ 56°) so the 4 layers read on first launch.
+      shellGeo.rotateY(Math.PI * 0.31);
       const shell = new THREE.Mesh(shellGeo, darkArmorMat);
       pistonInnerGroup.add(shell);
       const crownGeo = trackGeo(new THREE.CylinderGeometry(0.88, 0.88, 0.05, 32));
@@ -1007,6 +1056,9 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
         blade.rotation.y = -angle;
         blade.rotation.x = 0.45;
         turbineRotorGroup.add(blade);
+        // Fix 6 — blades ride on articulated pivot pins; the tick sets
+        // rotation.x live from turbinePitchDeg (15°–55°).
+        turbineBlades.push(blade);
       }
       registerStage(stageById('04'), g);
     }
@@ -1052,6 +1104,31 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
         g.add(tip);
       }
       registerStage(stageById('05'), g);
+    }
+
+    // Fix 2 — Circular Perimeter Water Flow Ports at Hull Bottom (Ray's
+    // words: "water flow around a circular perimeter around the center
+    // with holes that where the water goes through"). An annular
+    // distributor plate at the lower compression bulkhead, pierced by 12
+    // through-flow holes; water cascades down the cylinder walls, through
+    // these perimeter ports, into the Quad-Venturi intake bells, leaving
+    // the central core dry and isolated. Count/diameter (12 @ 60 mm) are
+    // the spec's model values — for Ray to true.
+    {
+      const perimeterPlateGeo = trackGeo(new THREE.RingGeometry(0.35, 1.15, 32));
+      perimeterPlateGeo.rotateX(-Math.PI / 2);
+      const perimeterPlate = new THREE.Mesh(perimeterPlateGeo, darkArmorMat);
+      perimeterPlate.position.y = 0.85;
+      buoyRoot.add(perimeterPlate);
+
+      // 12 perimeter port holes around center
+      const holeGeo = trackGeo(new THREE.CylinderGeometry(0.06, 0.06, 0.12, 12));
+      for (let i = 0; i < 12; i++) {
+        const ang = (i * Math.PI * 2) / 12;
+        const hole = new THREE.Mesh(holeGeo, brushedSteelMat);
+        hole.position.set(Math.cos(ang) * 0.78, 0.85, Math.sin(ang) * 0.78);
+        buoyRoot.add(hole);
+      }
     }
 
     // 06 — Graphene-Ion Scrub Electrodes
@@ -1243,26 +1320,27 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
     // air tank share ONE parent so they stroke synchronously. Reparenting
     // via .add() lifts each group out of its old parent (buoyRoot / the
     // stage-02 rig group) without touching the rest of the scene.
-    // DRIVE SIGNAL — CONFLICT FLAGGED, real file wins: the corrected spec
-    // wires the tick as movingCarriageGroup.position.y = -sim.strokeDepth.
-    // But strokeDepth in the real sim is a POSITIVE magnitude
-    // (|pistonPosition| * 0.72 + ...), so -strokeDepth would sink the
-    // carriage whenever the piston moves in EITHER direction — backwards
-    // against the real sim, where air forces the plunger UP on trigger
-    // (pistonPosition rises; the pistonOffset assignment in the tick
-    // below). The carriage is therefore driven by the real file's own
-    // pistonOffset (sim.pistonPosition * 0.65), preserving the exact
-    // visible motion. The -strokeDepth formula is flagged for Gemini to
-    // confirm or correct; the grouping itself (the verified-missing fix)
-    // is delivered.
+    // DRIVE SIGNAL — RESOLVED by Gemini's fix spec (Nov 22, 9:10 PM),
+    // Flag (a): Marlow's finding was 100% correct. The carriage is driven
+    // by pistonOffset = sim.pistonPosition * envelopeStrokeScale, where
+    // the scale makes the full stroke read in the scene: 1.65 units for
+    // Envelope A (1.0 m stroke), 1.07 for Envelope B (0.65 m). The sign
+    // follows the real sim (positive = air-driven upstroke). The local
+    // Y-offsets are zeroed here: pistonInnerGroup keeps its stage-02
+    // baseY (1.65) as a local offset so reparenting does not drop it, and
+    // centerNeedleGroup / underTankGroup already sit at local origin.
     const movingCarriageGroup = new THREE.Group();
-    if (pistonInnerGroup) movingCarriageGroup.add(pistonInnerGroup);
+    if (pistonInnerGroup) {
+      movingCarriageGroup.add(pistonInnerGroup);
+      pistonInnerGroup.position.y = stageById('02').baseY;
+    }
     movingCarriageGroup.add(centerNeedleGroup, underTankGroup);
     buoyRoot.add(movingCarriageGroup);
 
     // Center Vent Exhaust Nozzle (Gemini Answer 1 File 3): exhausts down
     // the central axis at the keel bottom, below the air tank. Parented
-    // to the carriage so it travels with the tank.
+    // to the carriage so it travels with the tank. Y moved to −5.05: the
+    // vertical tank now reaches −4.86, so the vent must sit below it.
     const centerVentGroup = new THREE.Group();
     const ventThroatGeo = trackGeo(new THREE.CylinderGeometry(0.09, 0.16, 0.3, 16));
     centerVentGroup.add(new THREE.Mesh(ventThroatGeo, darkArmorMat));
@@ -1271,8 +1349,29 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
     ventTip.rotation.x = Math.PI;
     ventTip.position.y = -0.26;
     centerVentGroup.add(ventTip);
-    centerVentGroup.position.set(0, -4.62, 0);
+    centerVentGroup.position.set(0, -5.05, 0);
     movingCarriageGroup.add(centerVentGroup);
+
+    // Fix 3 — Water OUT: 4 discharge relief levers at the keel bell.
+    // Hinged bell flappers that swing open outward +45° (OPEN) during
+    // DISCHARGE and snap shut during FILLING to prevent back-siphon.
+    // Each flap hangs from a top hinge; the tick swings it about its
+    // tangential hinge axis from the live exhaust angle.
+    for (let i = 0; i < 4; i++) {
+      const angle = (i * Math.PI) / 2 + Math.PI / 4;
+      const pivot = new THREE.Group();
+      pivot.position.set(Math.cos(angle) * 0.5, -4.9, Math.sin(angle) * 0.5);
+      pivot.userData.angle = angle;
+      const gate = new THREE.Mesh(
+        trackGeo(new THREE.BoxGeometry(0.34, 0.5, 0.05)),
+        darkArmorMat
+      );
+      gate.position.set(0, -0.25, 0);
+      gate.rotation.y = -angle;
+      pivot.add(gate);
+      buoyRoot.add(pivot);
+      exhaustFlapperPivots.push(pivot);
+    }
 
     // Flow Particle System (260 InstancedMesh droplets tracing the full 5-channel path)
     const PARTICLE_COUNT = 260;
@@ -1310,7 +1409,8 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
       bubbleSeeds.push({
         angle: Math.random() * Math.PI * 2,
         radius: 0.55 + Math.random() * 0.55,
-        y: -4.4 + Math.random() * 3.4,
+        // Seeds start below the vertical tank (now reaching −4.86).
+        y: -5.0 + Math.random() * 3.4,
         speed: 0.25 + Math.random() * 0.5,
       });
     }
@@ -1327,6 +1427,36 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
     const bubblePoints = new THREE.Points(bubbleGeo, bubbleMat);
     bubblePoints.frustumCulled = false;
     buoyRoot.add(bubblePoints);
+
+    // Fix 3 — Water OUT plume: high-velocity downward discharge plume
+    // exiting the keel into the seafloor grid on DISCHARGE. Visual only;
+    // positions are seeded, not simulated physics. Opacity and fall speed
+    // follow the live discharge pulse in the tick.
+    const PLUME_COUNT = 48;
+    const plumeGeo = trackGeo(new THREE.BufferGeometry());
+    const plumePositions = new Float32Array(PLUME_COUNT * 3);
+    const plumeSeeds: { angle: number; radius: number; t: number; speed: number }[] = [];
+    for (let i = 0; i < PLUME_COUNT; i++) {
+      plumeSeeds.push({
+        angle: Math.random() * Math.PI * 2,
+        radius: 0.15 + Math.random() * 0.45,
+        t: Math.random(),
+        speed: 0.5 + Math.random() * 0.7,
+      });
+    }
+    plumeGeo.setAttribute('position', new THREE.BufferAttribute(plumePositions, 3));
+    const plumeMat = trackMat(
+      new THREE.PointsMaterial({
+        color: 0xb8f6ff,
+        size: 0.09,
+        transparent: true,
+        opacity: 0.05,
+        depthWrite: false,
+      })
+    );
+    const plumePoints = new THREE.Points(plumeGeo, plumeMat);
+    plumePoints.frustumCulled = false;
+    buoyRoot.add(plumePoints);
 
     // Pre-warm shaders on GPU
     if (!isSoftwareGl) {
@@ -1600,14 +1730,34 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
       buoyRoot.rotation.z = 0;
 
       // Pan water fills from top slots -> triggers level/cam arm -> air forces Center Needle Plunger up
-      const pistonOffset = sim.pistonPosition * 0.65;
-      // Moving carriage (Gemini corrected spec File 3): piston + needle +
-      // air tank stroke together on the one carriage. The tank keeps its
-      // local explode offset (underTankGroup.position.y below); the needle
-      // keeps its local assembly position. Drive = the real file's own
-      // pistonOffset — NOT -sim.strokeDepth (see the carriage comment at
-      // the scene setup; flagged for Gemini to confirm or correct).
+      // Moving carriage (Gemini fix spec File 2, Flag (a) — CONFIRMED):
+      // piston + needle + vertical air tank stroke together on the one
+      // carriage. Drive = pistonOffset = sim.pistonPosition ×
+      // envelopeStrokeScale: 1.65 units for Envelope A (1.0 m stroke),
+      // 1.07 for Envelope B (0.65 m). Sign follows the real sim
+      // (positive = air-driven upstroke). The tank keeps its local
+      // explode offset (underTankGroup.position.y below); the needle
+      // keeps its local assembly position.
+      const envelopeStrokeScale = envelopeRef.current === 'B-gemini' ? 1.07 : 1.65;
+      const pistonOffset = sim.pistonPosition * envelopeStrokeScale;
       movingCarriageGroup.position.y = pistonOffset;
+
+      // Fix 3 — hinged water in/out levers from the live telemetry
+      // angles. Intake flaps swing down −35° (OPEN) while filling and
+      // shut to 0° on trigger/discharge; exhaust gates swing outward
+      // +45° (OPEN) on discharge and shut while filling.
+      const intakeAngleRad = THREE.MathUtils.degToRad(-sim.intakeFlapperAngleDeg);
+      intakeFlapperPivots.forEach((pivot) => {
+        const a = pivot.userData.angle as number;
+        _flapAxis.set(-Math.sin(a), 0, Math.cos(a));
+        pivot.quaternion.setFromAxisAngle(_flapAxis, intakeAngleRad);
+      });
+      const exhaustAngleRad = THREE.MathUtils.degToRad(sim.exhaustFlapperAngleDeg);
+      exhaustFlapperPivots.forEach((pivot) => {
+        const a = pivot.userData.angle as number;
+        _flapAxis.set(-Math.sin(a), 0, Math.cos(a));
+        pivot.quaternion.setFromAxisAngle(_flapAxis, exhaustAngleRad);
+      });
       if (pistonAirArrowMat) {
         pistonAirArrowMat.opacity = 0.25 + 0.55 * Math.min(1.25, sim.dischargePulse);
       }
@@ -1635,6 +1785,16 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
       }
       if (turbineRotorGroup) {
         turbineRotorGroup.rotation.y = turbineAngle;
+      }
+      // Fix 6 — variable-pitch center turbine: each blade rotates about
+      // its radial chord axis to the live pitch (15°–55°). NOTE: this
+      // file's OrbitControls are also named `controls`, so the pitch is
+      // read from telemetry (sim.turbinePitchDeg), not a controls object.
+      {
+        const pitchRad = THREE.MathUtils.degToRad(sim.turbinePitchDeg ?? 35);
+        turbineBlades.forEach((b) => {
+          b.rotation.x = pitchRad;
+        });
       }
 
       // Fibonacci Helical Core + Copper Coils harvest glow
@@ -1718,13 +1878,31 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
         const b = bubbleSeeds[i];
         if (!isPaused) {
           b.y += dt * b.speed;
-          if (b.y > -0.9) b.y = -4.4;
+          if (b.y > -0.9) b.y = -5.0;
         }
         bubblePositions[i * 3] = Math.cos(b.angle) * b.radius;
         bubblePositions[i * 3 + 1] = b.y + pistonOffset * 0.4;
         bubblePositions[i * 3 + 2] = Math.sin(b.angle) * b.radius;
       }
       bubbleGeo.attributes.position.needsUpdate = true;
+
+      // Fix 3 — discharge plume: falls from the keel into the seafloor
+      // grid while the exhaust levers are open; faint otherwise.
+      plumeMat.opacity = isPaused
+        ? 0.05
+        : 0.08 + Math.min(0.75, sim.dischargePulse * 0.7);
+      for (let i = 0; i < PLUME_COUNT; i++) {
+        const s = plumeSeeds[i];
+        if (!isPaused && sim.footValveOpen) {
+          s.t += dt * s.speed * (0.6 + sim.dischargePulse);
+          if (s.t > 1) s.t = 0;
+        }
+        const fallY = -5.15 - s.t * 1.35;
+        plumePositions[i * 3] = Math.cos(s.angle) * s.radius;
+        plumePositions[i * 3 + 1] = fallY;
+        plumePositions[i * 3 + 2] = Math.sin(s.angle) * s.radius;
+      }
+      plumeGeo.attributes.position.needsUpdate = true;
 
       controls.update();
       renderer.render(scene, camera);
@@ -2054,6 +2232,31 @@ export const BuoyCore3D: React.FC<BuoyCore3DProps> = ({
             >
               Over-Energize {overEnergize ? 'ON' : 'OFF'}
             </button>
+          </div>
+
+          {/* Center Turbine — Variable Pitch (Gemini fix spec File 6):
+              15°–55°, envelope default 35° (A) / 31° (B). The slider drives
+              the live blade pitch in the 3D core via telemetry. */}
+          <div className="flex flex-wrap items-center gap-2 bg-[#0b182e] px-2.5 py-1 rounded border border-cyan-500/15">
+            <label
+              htmlFor="turbine-pitch-slider"
+              className="text-[11px] font-mono text-cyan-200 whitespace-nowrap"
+            >
+              Center Turbine Pitch ({turbinePitchDeg}°)
+            </label>
+            <input
+              id="turbine-pitch-slider"
+              type="range"
+              min={15}
+              max={55}
+              step={1}
+              value={turbinePitchDeg}
+              onChange={(e) => onChangeTurbinePitchDeg(parseFloat(e.target.value))}
+              className="w-24 accent-cyan-400 cursor-pointer"
+            />
+            <span className="text-[10px] font-mono text-slate-400 whitespace-nowrap">
+              15°–55°
+            </span>
           </div>
 
           {/* Mode A Harvest / Mode B Boost */}

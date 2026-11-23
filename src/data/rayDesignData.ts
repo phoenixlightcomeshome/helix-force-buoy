@@ -118,6 +118,9 @@ export interface SimControls {
   // the dual-envelope power math. Optional so existing callers still
   // compile; absent means 'unresolved' (simulator refuses to run).
   envelope?: EnvelopeId | 'unresolved';
+  // Gemini fix spec (Nov 22, 9:10 PM) File 6: center axial turbine pitch,
+  // 15° .. 55°. Optional: absent means the envelope default (35° A / 31° B).
+  turbinePitchDeg?: number;
 }
 
 export interface SizingCalculationRow {
@@ -175,6 +178,13 @@ export interface SimTelemetry {
   needleValve: 'SEATED' | 'UNSEATED';
   accumulatorBar: number;
   warnings: string[];
+  // Gemini fix spec (Nov 22, 9:10 PM) File 1: turbine pitch + lever angles
+  // + coil current/loss, all derived live each step (never measured data).
+  turbinePitchDeg: number;
+  intakeFlapperAngleDeg: number; // 0° (shut) to 35° (open)
+  exhaustFlapperAngleDeg: number; // 0° (shut) to 45° (open)
+  coilCurrentA: number; // bus current = sim power / 48 V bus (simulation readout)
+  coilOhmicLossW: number; // I²R estimate from coilCurrentA + envelope resistance
 }
 
 export const APP_TITLE = 'Helix-Force Buoy 3D Core — Electric Field Generator System';
@@ -1614,6 +1624,46 @@ export const ENVELOPES: Record<EnvelopeId, SizingEnvelope> = {
   "B-gemini": ENVELOPE_B,
 };
 
+// Gemini fix spec (Nov 22, 9:10 PM) File 1 — coil electro-physics +
+// circuitry parameters. Resistances are ESTIMATES flagged for Ray to true;
+// nothing here is measured data.
+export const COIL_ELECTRICAL_DATA = {
+  conductivityCopperSm: 5.96e7,
+  conductivitySeawaterSm: 4.8,
+  resistivityCopperOhmM: 1.68e-8,
+  envelopeA: {
+    conductor: '2.5 mm² copper solid',
+    turnsPerPhase: 48,
+    phases: 3,
+    resistanceEstimateOhm: 0.18, // For Ray to true
+  },
+  envelopeB: {
+    conductor: '10 AWG equivalent Litz wire',
+    turnsPerPhase: 120,
+    phases: 3,
+    resistanceEstimateOhm: 0.08, // For Ray to true
+  },
+  // Live induced peak EMF readout from the spec (Envelope A); B is flagged
+  // as missing frequency in the spec — not derived here.
+  inducedPeakEmfVoltsA: 63.9,
+};
+
+export const CIRCUITRY_DATA = {
+  supercapacitorBank: '165 F @ 48 V (190 kJ usable)',
+  supercapacitorFarads: 165,
+  supercapacitorVolts: 48,
+  usableEnergyKJ: 190,
+  rectifier: 'Schottky Diode Bridge (120 A cont. / 200 A surge)',
+  rectifierForwardDropV: 0.38,
+  routerTopology: 'Four-Quadrant Bi-directional H-Bridge MOSFET',
+  busVoltageV: 48,
+  targetCurrentA: 41.67, // Envelope A
+  targetCurrentB: 42.0, // Envelope B
+  boostReserveSeconds: 90,
+  requiredEnergyPerShotKJA: 10.0,
+  requiredEnergyPerShotKJB: 16.5,
+};
+
 
 export type Conflict = {
   topic: string;
@@ -2178,6 +2228,28 @@ export function stepSimulation(
   // machine (air tank underneath drives the piston up).
   const nextAccumulatorBar = smoothPlungerAirBar;
 
+  // Gemini fix spec File 1 — turbine pitch + lever angles, derived live.
+  // Pitch: an explicit control wins; otherwise the envelope default
+  // (35° A / 31° B). Lever angles are magnitudes; the 3D view applies
+  // the sign (−35° intake open, +45° exhaust open).
+  const nextTurbinePitchDeg =
+    controls.turbinePitchDeg ?? (selectedEnvelope === 'B-gemini' ? 31 : 35);
+  const nextIntakeFlapperAngleDeg = nextFlapperOpen ? 35 : 0;
+  const nextExhaustFlapperAngleDeg = nextFootValveOpen ? 45 : 0;
+  // Coil current/loss (simulation readouts): bus current = sim power /
+  // 48 V bus; I²R from the envelope's estimated phase resistance.
+  const coilResistanceOhm =
+    selectedEnvelope === 'B-gemini'
+      ? COIL_ELECTRICAL_DATA.envelopeB.resistanceEstimateOhm
+      : COIL_ELECTRICAL_DATA.envelopeA.resistanceEstimateOhm;
+  const coilCurrentAndLoss = (powerWatts: number) => {
+    const coilCurrentA = Number((powerWatts / CIRCUITRY_DATA.busVoltageV).toFixed(1));
+    const coilOhmicLossW = Number(
+      (coilCurrentA * coilCurrentA * coilResistanceOhm).toFixed(1)
+    );
+    return { coilCurrentA, coilOhmicLossW };
+  };
+
   if (prev.mode === 'Boost') {
     const boostDuration = 2.4;
     const nextProgress = prev.boostProgress + clampedDt / boostDuration;
@@ -2242,6 +2314,10 @@ export function stepSimulation(
       footValveOpen: nextFootValveOpen,
       needleValve: nextNeedleValve,
       accumulatorBar: nextAccumulatorBar,
+      turbinePitchDeg: nextTurbinePitchDeg,
+      intakeFlapperAngleDeg: nextIntakeFlapperAngleDeg,
+      exhaustFlapperAngleDeg: nextExhaustFlapperAngleDeg,
+      ...coilCurrentAndLoss(simPowerWatts),
       warnings: [],
     };
   }
@@ -2313,6 +2389,10 @@ export function stepSimulation(
     footValveOpen: nextFootValveOpen,
     needleValve: nextNeedleValve,
     accumulatorBar: nextAccumulatorBar,
+    turbinePitchDeg: nextTurbinePitchDeg,
+    intakeFlapperAngleDeg: nextIntakeFlapperAngleDeg,
+    exhaustFlapperAngleDeg: nextExhaustFlapperAngleDeg,
+    ...coilCurrentAndLoss(simPowerWatts),
     warnings: [],
   };
 }

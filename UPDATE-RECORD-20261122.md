@@ -174,3 +174,77 @@ app, no edit to the pristine export folder, no money spent. Marlo (Copilot
 CLI) was not used for drafting — his monthly quota is exceeded (0.47 AI
 credits, 31 s, no draft, Nov 22 ~20:33); all edits were implemented
 directly in this session.
+
+---
+
+## Fix-spec application — Gemini's 9:10 PM fix spec, applied Nov 22 (late evening)
+
+Source: `~/workspace/helix-program/generator-system-design/GEMINI-BUOY-FIX-SPEC-20261122.md`
+(verbatim, from AI Studio chat "Managing Ephemeral Linux Environments", Gemini 3.8 Flash).
+
+### What changed, per file
+
+- `src/data/rayDesignData.ts` — `SimControls.turbinePitchDeg?` (15–55°); `SimTelemetry` gains
+  `turbinePitchDeg`, `intakeFlapperAngleDeg`, `exhaustFlapperAngleDeg`, `coilCurrentA`,
+  `coilOhmicLossW` (bus current = sim power / 48 V; loss = I²R). New verbatim constants
+  `COIL_ELECTRICAL_DATA` + `CIRCUITRY_DATA` (copper σ 5.96e7, seawater 4.8, ρ 1.68e-8;
+  A: 2.5 mm² solid / 48 turns / 0.18 Ω; B: 10 AWG Litz / 120 turns / 0.08 Ω; EMF 63.9 V
+  peak A; supercaps 165 F @ 48 V / 190 kJ; Schottky 120 A cont / 200 A surge; bus 48 V;
+  targets 41.67 A / 42.0 A; boost reserve 90 s; shot energy 10.0 kJ A / 16.5 kJ B).
+  `stepSimulation` computes pitch (explicit control wins, else 35° A / 31° B), lever angles
+  (35/0 intake, 45/0 exhaust), coil current/loss via `coilCurrentAndLoss(powerWatts)`; both
+  Boost and Harvest returns carry the five new fields.
+- `src/components/BuoyCore3D.tsx` — vertical air tank (CapsuleGeometry(0.38, 1.25), no
+  rotateZ, at (0, −3.85, 0)) with horizontal ring bands + repositioned struts; label +
+  leader at y −3.85; 4 intake flapper pivots (stage 01, hinge radius 0.95, y 0.14);
+  `shellGeo.rotateY(Math.PI × 0.31)` cutaway faces the default camera (azimuth ~56°);
+  turbine blades registered; perimeter plate (RingGeometry(0.35, 1.15) at y 0.85) + 12
+  holes (r 0.06, radius 0.78); carriage re-zeroed (`pistonInnerGroup.position.y =
+  stageById('02').baseY` = 1.65); center vent at y −5.05; 4 exhaust flapper pivots at the
+  keel (radius 0.5, y −4.9, gates hang down 0.25); bubble seeds from y −5.0; exhaust plume
+  Points cloud (48 points). Tick: carriage drive `pistonOffset = sim.pistonPosition ×
+  envelopeStrokeScale` (1.65 A / 1.07 B) — Gemini Flag (a) CONFIRMED; flapper animation
+  from telemetry angles; blade pitch from `sim.turbinePitchDeg` (NOT `controls.*` — this
+  file's `controls` is OrbitControls); plume falls y −5.15 → −6.5 with opacity tied to
+  footValveOpen/dischargePulse. Bottom dock gains the Center Turbine Pitch slider (15–55°,
+  step 1).
+- `src/components/CircuitryLayout.tsx` (NEW) — 5th tab "Circuitry & Energy": SVG single-line
+  schematic (Coils → Schottky → Smart Router → 165 F/48 V supercaps → 48 V/42 A bus, animated
+  dashes); cards for supercap bank, rectifier (0.38 V drop), H-bridge mode, battery reserve
+  vs 10.0/16.5 kJ shot energy, live coil; rolling 60-sample flow-vs-power chart
+  (flowRateNorm vs simPowerWatts, labeled normalized; stated flows noted as text: B 62.5 L/s
+  peak pulse [G20], A 12.5 L/s mean fill). All labeled SIMULATION READOUTS — NOT MEASURED
+  DATA + TARGET banner.
+- `src/components/CoilDropdown.tsx` (NEW) — header button "Coil Electrics" + slide-down panel:
+  conductivity/resistivity table, conductor + turns per envelope, live EMF formula
+  E = 4.44·f·N·B·A with 63.9 V peak A / B flagged missing frequency, live coilVolts /
+  coilCurrentA / I²R loss; closes via button/backdrop.
+- `src/components/Schematics.tsx` — valve strip gains perimeter-flow note (12 × 60 mm ports,
+  water through the ring into Quad-Venturi bells), live turbine pitch readout + torque
+  multiplier (sin(pitch)/sin(35°) estimate — for Ray to true, no formula was in the spec),
+  intake lever state (OPEN −35°/SHUT) and exhaust lever state (OPEN +45°/SHUT) tags.
+- `src/App.tsx` — ActiveSection gains 'circuitry'; nav adds "Circuitry & Energy"; imports
+  CircuitryLayout + CoilDropdown; `turbinePitchDeg` state (undefined = envelope default,
+  reset on envelope change via handleSelectEnvelope); effective pitch passed to BuoyCore3D
+  and stepSimulation (loop deps include it); CoilDropdown mounted in header Zone 3 next to
+  Boost; circuitry section rendered; initial telemetry gains the five new fields.
+
+### Verification
+
+- `bun run lint` (tsc --noEmit): PASS, no errors.
+- `bun run build` (vite): PASS — dist/index.html 1.36 kB, JS index-TkGhYRC4.js 1,060.96 kB,
+  CSS 38.26 kB.
+- Sim check (bun, 600 + 600 + 300 + 300 steps, both envelopes): ALL PASS — pitch defaults
+  35 (A) / 31 (B), explicit overrides 50 / 15 respected, all three phases seen, lever
+  angles match phase every step, coil math I = P/48 and loss = I²R verified against
+  0.18 Ω (A) / 0.08 Ω (B), 11 cycles per 30 s of sim, no NaN.
+- Bundle contains "Circuitry & Energy", "Coil Electrics", "Turbine Pitch", "Perimeter
+  Ports", "Supercapacitor Bank", "Coil Analysis"; tank rotateZ absent from the vessel.
+- `bun run preview` (port 4173): index 200, JS 200, diagram image 200 under
+  /helix-force-buoy/.
+
+### Still for Ray to true (unchanged from the spec)
+
+Turbine pitch range (spec models 15–55°, defaults 35° A / 31° B); coil DC resistance per
+phase (0.18 Ω A / 0.08 Ω B, estimates); secondary battery chemistry + Ah; perimeter hole
+count/diameter (12 @ 60 mm). 2,000 W stays TARGET ONLY — NOT MEASURED. Nothing invented.

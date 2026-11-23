@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Zap } from 'lucide-react';
 import { BuoyCore3D } from './components/BuoyCore3D';
+import { CircuitryLayout } from './components/CircuitryLayout';
+import { CoilDropdown } from './components/CoilDropdown';
 import { DisplayForms } from './components/DisplayForms';
 import { OperatingPrincipleAndSizing } from './components/OperatingPrincipleAndSizing';
 import { PartDetailModal } from './components/PartDetailModal';
@@ -21,7 +23,7 @@ import {
   TideLevel,
 } from './data/rayDesignData';
 
-type ActiveSection = 'core3d' | 'drawings' | 'schematics' | 'forms';
+type ActiveSection = 'core3d' | 'drawings' | 'schematics' | 'forms' | 'circuitry';
 
 export default function App() {
   const [section, setSection] = useState<ActiveSection>('core3d');
@@ -36,6 +38,15 @@ export default function App() {
   const [envelope, setEnvelope] = useState<EnvelopeId | 'unresolved'>('unresolved');
   const envelopeResolved = envelope !== 'unresolved';
   const selectedEnv = envelopeResolved ? ENVELOPES[envelope] : null;
+  // Gemini fix spec File 6 — center turbine pitch. Undefined means the
+  // envelope default (35° A / 31° B); the slider sets an explicit value.
+  // Switching envelopes resets to the new envelope's default.
+  const [turbinePitchDeg, setTurbinePitchDeg] = useState<number | undefined>(undefined);
+  const effectivePitchDeg = turbinePitchDeg ?? (envelope === 'B-gemini' ? 31 : 35);
+  const handleSelectEnvelope = useCallback((env: EnvelopeId | 'unresolved') => {
+    setEnvelope(env);
+    setTurbinePitchDeg(undefined);
+  }, []);
 
   const [telemetry, setTelemetry] = useState<SimTelemetry>({
     deltaP: 840,
@@ -73,6 +84,12 @@ export default function App() {
     needleValve: 'SEATED',
     accumulatorBar: 1.45,
     warnings: [],
+    // Gemini fix spec File 1 — pitch + lever angles + coil current/loss.
+    turbinePitchDeg: 35,
+    intakeFlapperAngleDeg: 35,
+    exhaustFlapperAngleDeg: 0,
+    coilCurrentA: 0,
+    coilOhmicLossW: 0,
   });
 
   // Shared live simulation loop so 3D Core, Technical Drawings, Schematics, and Display Forms stay synchronized.
@@ -97,6 +114,7 @@ export default function App() {
             plungerSetting,
             overEnergize,
             envelope,
+            turbinePitchDeg,
           })
         );
       }
@@ -105,7 +123,7 @@ export default function App() {
 
     rafId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafId);
-  }, [tide, paused, plungerSetting, overEnergize, envelope, envelopeResolved]);
+  }, [tide, paused, plungerSetting, overEnergize, envelope, envelopeResolved, turbinePitchDeg]);
 
   const handleTriggerBoost = useCallback(() => {
     setTelemetry((prev) => {
@@ -143,6 +161,7 @@ export default function App() {
     { id: 'drawings', label: 'Technical Drawings' },
     { id: 'schematics', label: 'Schematics' },
     { id: 'forms', label: 'Display Forms' },
+    { id: 'circuitry', label: 'Circuitry & Energy' },
   ];
 
   return (
@@ -182,11 +201,14 @@ export default function App() {
           })}
         </nav>
 
-        {/* Zone 3: permanent TARGET banner (cannot be toggled off) + 1 primary action */}
+        {/* Zone 3: permanent TARGET banner (cannot be toggled off) + coil
+            dropdown + 1 primary action */}
         <div className="shrink-0 flex items-center gap-3">
           <span className="hidden lg:inline font-mono text-[11px] text-amber-300 whitespace-nowrap">
             {TARGET_OUTPUT_LABEL} · SIMULATION READOUTS ONLY
           </span>
+          {/* Gemini fix spec File 4 — Coil Analysis & Electrics dropdown */}
+          <CoilDropdown telemetry={telemetry} envelope={envelope} />
           <button
             type="button"
             onClick={handleTriggerBoost}
@@ -224,7 +246,7 @@ export default function App() {
           <div className="flex items-center gap-2" role="group" aria-label="Sizing envelope">
             <button
               type="button"
-              onClick={() => setEnvelope('A-marlow')}
+              onClick={() => handleSelectEnvelope('A-marlow')}
               className={`px-2.5 py-1 rounded border text-[11px] transition-colors whitespace-nowrap ${
                 envelope === 'A-marlow'
                   ? 'bg-cyan-500/25 text-cyan-200 border-cyan-400/50 font-semibold'
@@ -235,7 +257,7 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setEnvelope('B-gemini')}
+              onClick={() => handleSelectEnvelope('B-gemini')}
               className={`px-2.5 py-1 rounded border text-[11px] transition-colors whitespace-nowrap ${
                 envelope === 'B-gemini'
                   ? 'bg-cyan-500/25 text-cyan-200 border-cyan-400/50 font-semibold'
@@ -246,7 +268,7 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setEnvelope('unresolved')}
+              onClick={() => handleSelectEnvelope('unresolved')}
               className={`px-2.5 py-1 rounded border text-[11px] transition-colors whitespace-nowrap ${
                 envelope === 'unresolved'
                   ? 'bg-amber-400/20 text-amber-200 border-amber-400/50 font-semibold'
@@ -284,6 +306,9 @@ export default function App() {
             paused={paused}
             plungerSetting={plungerSetting}
             overEnergize={overEnergize}
+            envelope={envelope}
+            turbinePitchDeg={effectivePitchDeg}
+            onChangeTurbinePitchDeg={setTurbinePitchDeg}
             selectedStageId={selectedStageId}
             onSelectStage={setSelectedStageId}
             onChangeTide={setTide}
@@ -343,6 +368,10 @@ export default function App() {
             onOpenPartDetail={(partNum) => setDetailPartNumber(partNum)}
             onOpenCenterNeedle={handleOpenCenterNeedle}
           />
+        )}
+
+        {section === 'circuitry' && (
+          <CircuitryLayout telemetry={telemetry} envelope={envelope} />
         )}
 
         {/* Operating Principle & 2,000 W Sizing Reference Band */}
